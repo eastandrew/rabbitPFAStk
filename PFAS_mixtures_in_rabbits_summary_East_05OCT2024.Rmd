@@ -1,0 +1,1294 @@
+---
+title: "Rabbit_PFAS_TK_and_TTC_and_data_summary"
+author: "Andrew East"
+date: "2024-10-05"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+    code_download: yes
+---
+
+
+
+```{r, warning=F, message=F}
+
+library(tidyverse)
+rabbita <- read_csv("Rabbit_thirdsend_stacked_data_15SEP2023.csv")
+library(knitr)
+library(ggpubr)
+library(minpack.lm)
+library(nlstools)
+library(broom)
+library(nls.multstart)
+
+###! Tread Carefully Here !##
+options(dplyr.summarise.inform=F) 
+### This turns off the tidyverse summarize/summarise messages indicating default grouping patterns in resultant tibbles ##
+### If you don't know what this means, check out https://stackoverflow.com/questions/62140483/how-to-interpret-dplyr-message-summarise-regrouping-output-by-x-override
+### Implications of this being false are unknown errors and impacts in other activities in this R session that you may not detect without these messages!
+
+```
+
+
+```{r}
+
+
+
+rabbit <- rabbita |>
+  pivot_longer(c(kidney, liver, muscle), names_to="tissue", values_to="concentration") # tissues are in wide format
+
+rabbit <- rabbit |>
+  group_by(PFAS, tissue) |>
+  mutate(minconc=min(concentration[concentration!=0])) # identify the PFAS+tissue-wise non-zero minimum concentration (zeros are put in for non-detects...)
+
+rabbit <- rabbit |>
+  mutate(conc3=case_when(
+    concentration==0&timemod==0~minconc,          # on the starting timepoint, set non-detects to minimum concentration to ensure regressions have starting point
+    concentration==0&timemod>=1~as.numeric(NA),   # for other timepoints, set non-detects to NA to they are approriately excluded from regressions
+    T~concentration                               # all other data leave 
+  ))
+
+rabbit$depday <- rabbit$timemod-28                                              #add depuration day  
+rabbit$dietperiod <- ifelse(rabbit$timemod>=29, "elimination","uptake")         #code for uptake or elimination data (not used)
+rabbit$sex <- factor(ifelse(str_detect(rabbit$rabbitID,"F"),"Female","Male"))   #code for sex
+
+
+rabbit <- rabbit %>%
+  group_by(PFAS,time) %>%
+  mutate(meandietconc=mean(dietconcentration))    #add PFAS+time-wise mean concentration (mean of groups' diets)
+
+rabbit <- rabbit |>
+  filter(!(PFAS=="PFOS"&group==1)) # PFOS group 1 LOQ is 1000 ng/L, while others in that groups are 0.5, 1,2,5,10,20. Reporting limits are 10-100-fold above others accordingly high rate of non-detects is non-sensical and strategies to manage non-detects are inappropriate
+
+rabbit <- rabbit|> ungroup()       # set dataset back to ungrouped tibble
+
+```
+
+```{r}
+
+rabbit |>
+  filter(timemod==56&PFAS=="PFOS")|>
+  dplyr::select(rabbitID, tissue,conc3) |>
+  arrange(tissue,rabbitID) |>
+  kable(caption="RF61 muscle PFOS is 100-fold above other samples collected on day 56")
+
+rabbit <- rabbit |> 
+  filter(rabbitID!="RF61")
+
+```
+
+# Summary of data  
+
+## Diet summary  
+
+```{r}
+
+dietsumm <- rabbit |>
+  group_by(group, PFAS, timemod) |>
+  summarize(
+    dietconcentration=first(dietconcentration)
+  )
+
+dietsummbyperiodG <- rabbit |>
+  group_by(group, PFAS, dietperiod) |>
+  summarize(
+    countdays=length(unique(timemod)),
+    mean=mean(dietconcentration),
+    median=median(dietconcentration, na.rm=T),
+    sd=sd(dietconcentration, na.rm=T),
+    sem=sd/sqrt(countdays),
+    perc_cv=(sd/mean)*100,
+    upper=quantile(dietconcentration, probs=c(0.975), names=F, na.rm=T),
+    lower=quantile(dietconcentration, probs=c(0.025), names=F, na.rm=T)
+  ) |>
+  arrange(PFAS, desc(dietperiod))
+
+kable(dietsummbyperiodG, caption="summary of diets by uptake and elimination and groups")
+
+dietsummbyperiod <- rabbit |>
+  group_by(PFAS, dietperiod) |>
+  summarize(
+    countdays=length(unique(timemod)),
+    mean=mean(dietconcentration),
+    median=median(dietconcentration, na.rm=T),
+    sd=sd(dietconcentration, na.rm=T),
+    sem=sd/sqrt(countdays),
+    perc_cv=(sd/mean)*100,
+    upper=quantile(dietconcentration, probs=c(0.975), names=F, na.rm=T),
+    lower=quantile(dietconcentration, probs=c(0.025), names=F, na.rm=T)
+  ) |>
+  arrange(PFAS, desc(dietperiod))
+
+kable(dietsummbyperiod, caption="summary of diets by uptake and elimination, groups are combined")
+
+```
+
+
+## Uptake period diet summary  
+
+```{r}
+
+dietsummbyperiodG28 <- rabbit |>
+  filter(dietperiod=="uptake") |>
+  group_by(group, PFAS, dietperiod) |>
+  summarize(
+    countdays=length(unique(timemod)),
+    mean=mean(dietconcentration),
+    median=median(dietconcentration, na.rm=T),
+    sd=sd(dietconcentration, na.rm=T),
+    sem=sd/sqrt(countdays),
+    perc_cv=(sd/mean)*100,
+    upper=quantile(dietconcentration, probs=c(0.975), names=F, na.rm=T),
+    lower=quantile(dietconcentration, probs=c(0.025), names=F, na.rm=T)
+  ) |>
+  arrange(PFAS, desc(dietperiod))
+
+kable(dietsummbyperiodG28, caption="Uptake period summary of diets by uptake and elimination and groups")
+
+dietsummbyperiod28 <- rabbit |>
+  filter(dietperiod=="uptake") |>
+  group_by(PFAS, dietperiod) |>
+  summarize(
+    countdays=length(unique(timemod)),
+    mean=mean(dietconcentration),
+    median=median(dietconcentration, na.rm=T),
+    sd=sd(dietconcentration, na.rm=T),
+    sem=sd/sqrt(countdays),
+    perc_cv=(sd/mean)*100,
+    upper=quantile(dietconcentration, probs=c(0.975), names=F, na.rm=T),
+    lower=quantile(dietconcentration, probs=c(0.025), names=F, na.rm=T)
+  ) |>
+  arrange(PFAS, desc(dietperiod))
+
+kable(dietsummbyperiod28, caption="Uptake summary of diets by uptake and elimination, groups are combined")
+
+```
+
+
+## Rabbit tissue concentrations  
+
+Excludes group 1 PFOS as LOQ is 1000-fold above others.  
+Rabbit "RF61" (female, number 61, in group 3, samples collected day 56) is excluded from all analyses based on muscle outlier which drives whole animal estimate well outside reasonable.
+
+```{r}
+
+rabbitsumm <- rabbit |> 
+  group_by(PFAS,tissue,timemod) |>
+  summarize(
+    count=sum(!is.na(conc3)),
+    mean=mean(conc3, na.rm=T),
+    median=median(conc3, na.rm=T),
+    sd=sd(conc3, na.rm=T),
+    sem=sd/sqrt(count),
+    perc_cv=(sd/mean)*100,
+    upper=quantile(conc3, probs=c(0.975), names=F, na.rm=T),
+    lower=quantile(conc3, probs=c(0.025), names=F, na.rm=T),
+  )
+```
+
+```{r}
+
+kable(rabbitsumm, digits=3, caption="summary rabbit concentrations data by PFAS, tissue, and time")
+
+```
+
+```{r}
+
+rabbitsummG <- rabbit |> 
+  group_by(group, PFAS,tissue,timemod) |>
+  summarize(
+    count=sum(!is.na(conc3)),
+    mean=mean(conc3, na.rm=T),
+    median=median(conc3, na.rm=T),
+    sd=sd(conc3, na.rm=T),
+    sem=sd/sqrt(count),
+    perc_cv=(sd/mean)*100,
+    upper=quantile(conc3, probs=c(0.975), names=F, na.rm=T),
+    lower=quantile(conc3, probs=c(0.025), names=F, na.rm=T),
+  )
+
+```
+
+```{r}
+
+kable(rabbitsummG, digits=3, caption="summary rabbit concentrations data by group, PFAS, tissue, and time")
+
+```
+
+
+# Estimated whole animal concentration  
+
+Estimated whole animal concentration is animal-specific and PFAS-specific sum of tissue concentrations weighted by their proportional contribution to bodyweight.  
+
+NA for any tissue leads to an NA for that animal's estimated whole animal to ensure consistentcy of number of tissue contributing to measures--and most NA are in muscle, which contributes majority of body burden, so generates bimodal distribtions, which are defined by LOQ and extraction efficiency, etc. and not representative of real variability.  
+
+$$ \widehat{[whole animal]} = ([liver]\frac{liverweight}{bodyweight})+([kidney]\frac{kidneyweight}{bodyweight})+([muscle]* 0.3) $$  
+
+Note that this covers approximately 3% of the bodyweight in liver and kidney and 30% as muscle. Accordingly, per unit mass this represents 33% of the rabbits' PFAS body. However, given that we know liver and kidney will have outsized affinity and predators would consume large internal tissues and muscle, it is likely representative of a predator diet.  
+
+
+```{r}
+
+rabbitwide <- rabbit |>
+  filter(rabbitID!="RF61") |>
+  ungroup() |>
+  dplyr::select(PFAS, tissue, rabbitID, sex, group, meandietconc, dietconcentration,bodyweight, liverweight, kidneyweight, muscleweight, musclefraction, timemod, depday, conc3) |>
+  pivot_wider(
+    names_from=tissue,
+    values_from=conc3
+  )
+
+rabbitwide$combinedconc3 <- ((rabbitwide$liver*(rabbitwide$liverweight/rabbitwide$bodyweight))+
+                               (rabbitwide$kidney*(rabbitwide$kidneyweight/rabbitwide$bodyweight))+
+                               (as.numeric(rabbitwide$muscle)*rabbitwide$musclefraction))
+
+
+rabbitwide <- rabbitwide |>
+  group_by(PFAS,rabbitID) |>
+  mutate(
+    combinedconc3b=sum((liver*(liverweight/bodyweight)), (kidney*(kidneyweight/bodyweight)), (muscle*musclefraction), na.rm=T) # includes incomplete cases (likely highly biased by muscle situation)
+  )
+
+rabbitwide <- rabbitwide |>
+  group_by(rabbitID) |>
+  mutate(
+    combinedconc3c=sum((liver*(liverweight/bodyweight)), (kidney*(kidneyweight/bodyweight)), (muscle*musclefraction), na.rm=T)  # total PFAS per rabbit
+  )
+
+
+```
+
+
+
+## Summarized whole animal concentrations  
+
+
+```{r}
+
+rabbitwidesumm <- rabbitwide |> 
+  group_by(PFAS, timemod) |>
+  summarize(
+    count=sum(!is.na(combinedconc3)),
+    mean=mean(combinedconc3, na.rm=T),
+    median=median(combinedconc3, na.rm=T),
+    sd=sd(combinedconc3, na.rm=T),
+    sem=sd/sqrt(count),
+    perc_cv=(sd/mean)*100,
+    upper=quantile(combinedconc3, probs=c(0.975), names=F, na.rm=T),
+    lower=quantile(combinedconc3, probs=c(0.025), names=F, na.rm=T)
+  )
+
+kable(rabbitwidesumm, caption="whole rabbit estimated concentration summarized by PFAS and time; groups are combined")
+
+
+rabbitwidesummg <- rabbitwide |> 
+  group_by(group,PFAS, timemod) |>
+  summarize(
+    count=sum(!is.na(combinedconc3)),
+    mean=mean(combinedconc3, na.rm=T),
+    median=median(combinedconc3, na.rm=T),
+    sd=sd(combinedconc3, na.rm=T),
+    sem=sd/sqrt(count),
+    perc_cv=(sd/mean)*100,
+    upper=quantile(combinedconc3, probs=c(0.975), names=F, na.rm=T),
+    lower=quantile(combinedconc3, probs=c(0.025), names=F, na.rm=T)
+  )
+
+kable(rabbitwidesummg, caption="whole rabbit estimated concentration summarized by group, PFAS, and time")
+
+```
+
+
+
+## Day 28 summarized whole animal concentrations  
+
+```{r}
+
+rabbitwidesumm28 <- rabbitwide |> 
+  filter(timemod==28)|>
+  group_by(PFAS, timemod) |>
+  summarize(
+    count=sum(!is.na(combinedconc3)),
+    mean=mean(combinedconc3, na.rm=T),
+    median=median(combinedconc3, na.rm=T),
+    sd=sd(combinedconc3, na.rm=T),
+    sem=sd/sqrt(count),
+    perc_cv=(sd/mean)*100,
+    upper=quantile(combinedconc3, probs=c(0.975), names=F, na.rm=T),
+    lower=quantile(combinedconc3, probs=c(0.025), names=F, na.rm=T)
+  )
+
+kable(rabbitwidesumm28, caption="Day 28 whole rabbit estimated concentration summarized by PFAS and time; groups combined")
+
+rabbitwidesumm28g <- rabbitwide |> 
+  filter(timemod==28)|>
+  group_by(group,PFAS, timemod) |>
+  summarize(
+    count=sum(!is.na(combinedconc3)),
+    mean=mean(combinedconc3, na.rm=T),
+    median=median(combinedconc3, na.rm=T),
+    sd=sd(combinedconc3, na.rm=T),
+    sem=sd/sqrt(count),
+    perc_cv=(sd/mean)*100,
+    upper=quantile(combinedconc3, probs=c(0.975), names=F, na.rm=T),
+    lower=quantile(combinedconc3, probs=c(0.025), names=F, na.rm=T)
+  )
+
+kable(rabbitwidesumm28g, caption="Day 28 whole rabbit estimated concentration summarized by group, PFAS, and time")
+
+```
+
+
+
+
+
+
+# Elimination rates using linear regression per OECD TG#305  
+
+*Note* that all y-axes here are ln-transformed. So, elimination rates (slope of linear regressions) represent exponential decay rate in exponential decay function (see OECD TG#305). They also, accordingly, represent a multiplicative rate (day 2 is day*slope) and are essentially a percent decrease (or increase) measure.    
+
+Regardless of p-value, one would still consider a 1% multiplicative reduction to be biologically relevant. Do not reject values if they are "not significant."  
+
+Better rejection criteria include review of actual data and number of detections through time, etc.  
+
+```{r}
+
+
+
+rabbitwide|> filter(depday%in%c(0:28)) |> 
+  as_tibble() |>
+  nest(data = -c(PFAS)) |>
+  mutate(
+    fit = map(data, ~ lm(log(combinedconc3) ~ depday, data = .x)),
+    tidied = map(fit, tidy)
+  ) |>
+  unnest(tidied) |>
+  #filter(term=="depday") |>
+  mutate(
+    term=case_when(
+      term=="depday"~"Slope",
+      T~"(Intercept)"
+    )
+  ) |>
+  dplyr::select(-c(data,fit,statistic)) |>
+  arrange(PFAS) |>
+  kable(caption="Parameter estimates for each PFAS with all groups combined. (Intercept) is ln(concentration) for day 28 concentration. Slope is elimination rate.")
+
+
+elimrates <- rabbitwide|> filter(depday%in%c(0:28)) |> 
+  as_tibble() |>
+  nest(data = -c(PFAS)) |>
+  mutate(
+    fit = map(data, ~ lm(log(combinedconc3) ~ depday, data = .x)),
+    tidied = map(fit, tidy)
+  ) |>
+  unnest(tidied) |>
+  filter(term=="depday")|>
+  dplyr::select(-c(data,fit,statistic)) |>
+  data.frame()
+  
+
+
+```
+
+
+
+```{r}
+
+
+rabbitwide|> filter(depday%in%c(0:28)&!is.na(combinedconc3)) |> as_tibble() |>
+  nest(data = -c(group,PFAS)) |>
+  mutate(
+    fit = map(data, ~ lm(log(combinedconc3) ~ depday, data = .x)),
+    tidied = map(fit, tidy)
+  ) |>
+  unnest(tidied) |>
+  #filter(term=="depday") |>
+  mutate(
+    term=case_when(
+      term=="depday"~"Slope",
+      T~"(Intercept)"
+    )
+  ) |>
+  dplyr::select(-c(data,fit,statistic)) |>
+  arrange(group, PFAS) |>
+  kable(caption="Parameter estimates for each PFAS by group. (Intercept) is ln(concentration) for day 28 concentration. Slope is elimination rate. Note that negative elimination rates indicate increasing concentrations during elimination period.")
+
+
+```
+
+
+
+```{r}
+
+ggplot(data = rabbitwide%>%filter(depday%in%c(0:28)), 
+       aes(x = depday, y = log(combinedconc3))) +
+  stat_smooth(method = "lm", se=T, color="black", formula = y ~ x) +
+  geom_point() +
+  stat_cor(aes(label = paste(after_stat(rr.label), after_stat(p.label), sep = "~`,`~")),
+           r.accuracy = 0.01,
+           p.accuracy = 0.001,
+           label.x = 0, label.y = 3, size = 3) +
+  stat_regline_equation(aes(label = after_stat(eq.label)),
+                        label.x = 0, label.y = 4, size = 3) +
+  theme_classic() +
+  facet_wrap(~fct_reorder(PFAS,log(combinedconc3), .fun=median, .desc=T, .na_rm=T), scales="free_y") +
+  labs(y="Combined ln(concentration, \u03BCg/kg)", x="Depuration day (study day - 28)", caption="All groups combined")
+
+```
+
+
+
+
+
+
+# Uptake rates using linear regression per OECD TG#305 
+
+*Note* that all y-axes here are ln-transformed. So, the slope estimates represent multiplicative increase rates (day 2 is day 1 * slope).  
+
+*Note* that the assumption that these uptake data are linear is not pure. Modification of this method to more strictly follow OECD TG#305 would require fitting slope "during linear phase of uptake" which would vary per PFAS, but be approximately between days 0 and 7. In pilot runs, this leads to quite high rates of uptake which leads to stuggles in downstream non-linear models.  
+
+Use caution in interpretation of these values as uptake rates.
+
+```{r}
+
+rabbitwide|> filter(timemod%in%c(0:28)) |> as_tibble() |>
+  nest(data = -PFAS) |>
+  mutate(
+    fit = map(data, ~ lm(log(combinedconc3) ~ timemod, data = .x)),
+    tidied = map(fit, tidy)
+  ) |>
+  unnest(tidied) |>
+  #filter(term=="depday") |>
+  mutate(
+    term=case_when(
+      term=="timemod"~"Slope",
+      T~"(Intercept)"
+    )
+  ) |>
+  dplyr::select(-c(data,fit,statistic)) |>
+  arrange(PFAS) |>
+  kable(caption="Parameter estimates for each PFAS with all groups combined. (Intercept) is ln(concentration) for day 0 concentration. Slope is uptake rate across 28 days exposure.")
+
+
+uptakerates <- rabbitwide|> filter(timemod%in%c(0:28)) |> as_tibble() |>
+  nest(data = -PFAS) |>
+  mutate(
+    fit = map(data, ~ lm(log(combinedconc3) ~ timemod, data = .x)),
+    tidied = map(fit, tidy)
+  ) |>
+  unnest(tidied) |>
+  filter(term=="timemod") |>
+  dplyr::select(-c(data,fit,statistic)) 
+
+
+rabbitwide|> filter(timemod%in%c(0:28)) |> as_tibble() |>
+  nest(data = -c(group,PFAS)) |>
+  mutate(
+    fit = map(data, ~ lm(log(combinedconc3) ~ timemod, data = .x)),
+    tidied = map(fit, tidy)
+  ) |>
+  unnest(tidied) |>
+  #filter(term=="depday") |>
+  mutate(
+    term=case_when(
+      term=="timemod"~"Slope",
+      T~"(Intercept)"
+    )
+  ) |>
+  dplyr::select(-c(data,fit,statistic)) |>
+  arrange(group,PFAS) |>
+  kable(caption="Parameter estimates for each PFAS by group. (Intercept) is ln(concentration) for day 0 concentration. Slope is uptake rate across 28 days exposure.")
+
+
+```
+
+
+
+
+
+```{r}
+
+
+ggplot(data = rabbitwide%>%filter(timemod%in%c(0:28)), 
+       aes(x = timemod, y = log(combinedconc3))) +
+  stat_smooth(method = "lm", se=T, color="black", formula = y ~ x) +
+  geom_point() +
+  stat_cor(aes(label = paste(after_stat(rr.label), after_stat(p.label), sep = "~`,`~")),
+           r.accuracy = 0.01,
+           p.accuracy = 0.001,
+           label.x = 0, label.y = 3, size = 3) +
+  stat_regline_equation(aes(label = after_stat(eq.label)),
+                        label.x = 0, label.y = 4, size = 3) +
+  theme_classic() +
+  facet_wrap(~fct_reorder(PFAS,log(combinedconc3), .fun=median, .desc=T, .na_rm=T), scales="free_y") +
+  labs(y="Combined ln(concentration, \u03BCg/kg)", x="Study day", caption="only values above LOQ unless day 0 (day 0 min set to PFAS-, tissue-specific minimum); all groups combined.")
+
+```
+
+
+
+
+
+
+
+# PFAS-specific non-linear models  
+
+Group 1 excluded from PFOS and "RF61" excluded from all.  
+
+## PFOS  
+
+mean diet is 7.1  
+mean starting background is 0.2927293  
+elimination rate is 0.0043 (negative is in function not value) with se of 0.0099  
+starting uptake is 0.1
+
+*NOTE* PFOS has group 1 excluded.  
+
+```{r}
+
+
+
+oswb <- rabbitwide |> filter(PFAS=="PFOS")
+oswb$meanuptakediet <- mean(oswb$meandietconc[oswb$timemod<=28])
+oswb$background <- mean(rabbitwide$combinedconc3[rabbitwide$PFAS=="PFOS"&rabbitwide$timemod==0])
+oswb$elimrate <- -elimrates$estimate[elimrates$PFAS=="PFOS"] #note that this requires changing the sign to "positive"
+oswb$uprate <- uptakerates$estimate[uptakerates$PFAS=="PFOS"]
+
+
+oswbnls <- nls(combinedconc3~background+((meanuptakediet*k01)/(V*(k01-elimrate)))*(exp(-elimrate*timemod)-exp(-k01*timemod)),
+               #combinedconc3~0.2927293+((7.1*k01)/(V*(k01-0.029)))*(exp(-0.029*timemod)-exp(-k01*timemod)),
+               data=oswb,
+               start=list(V=1, k01=0.1) ,upper=c(10,1), lower=c(0,0),algorithm="port"#,trace=T
+             )
+
+```
+
+### Parametric estimate of uptake rate and Vd using OECD elimination rate  
+
+```{r}
+summary(oswbnls)
+#overview(oswbnls)
+
+```
+
+
+```{r}
+oswbnlsboot <- nlsBoot(nls(combinedconc3~background+((meanuptakediet*k01)/(V*(k01-elimrate)))*(exp(-elimrate*timemod)-exp(-k01*timemod)),
+               data=oswb|>filter(!is.na(combinedconc3)),
+               start=list(V=1, k01=0.1) ,upper=c(10,1), lower=c(0,0),algorithm="port"#,trace=T
+             ))
+```
+
+### Bootstrap estimate of uptake rate and Vd using OECD elimination rate  
+
+```{r}
+summary(oswbnlsboot)
+
+
+```
+
+
+```{r}
+
+oswb$uptakeboot <- oswbnlsboot$estiboot[2,1]
+oswbnlsboot2 <- nlsBoot(nls(combinedconc3~background+((meanuptakediet*uptakeboot)/(V*(uptakeboot-k10)))*(exp(-k10*timemod)-exp(-uptakeboot*timemod)),
+               data=oswb|>filter(!is.na(combinedconc3)),
+               start=list(V=1, k10=0.0043) ,upper=c(10,1), lower=c(0,0),algorithm="port"#,trace=T
+             ))
+```
+
+### Bootstrap estimate of elimination rate and Vd using bootstrap uptake rate  
+
+```{r}
+summary(oswbnlsboot2)
+
+oswb$elimboot <- oswbnlsboot2$estiboot[2,1]
+```
+
+
+```{r}
+
+bafvectoswb <- data.frame(
+  up=c(sample(oswbnlsboot$coefboot[,2], size=10000, replace=T)), 
+  down=c(sample(oswbnlsboot2$coefboot[,2], size=10000, replace=T)),
+  PFAS="PFOS"
+  )
+
+#nlsBootPredict(oswbnlsboot,
+#               newdata=data.frame(
+#                 timemod=seq(0,56,1),
+#                 background=oswb$background[1],
+#                 meanuptakediet=oswb$meanuptakediet[1],
+#                 elimrate=oswb$elimrate[1]
+#                 #uptakeboot=oswbnlsboot$estiboot[2,1]
+#               ), interval="confidence")
+
+
+oswbnlspredboot <- data.frame(
+  nlsBootPredict(
+    oswbnlsboot, newdata=data.frame(
+      timemod=seq(0,56,by=0.1),
+      background=oswb$background[1],
+      meanuptakediet=oswb$meanuptakediet[1],
+      elimrate=oswb$elimrate[1]
+      #uptakeboot=oswbnlsboot$estiboot[2,1]
+      ), interval="confidence"))
+oswbnlspredboot$timemod <- c(seq(from=0,to=56,by=0.1))
+
+oswbnlspredboot2 <- data.frame(
+  nlsBootPredict(
+    oswbnlsboot2, newdata=data.frame(
+      timemod=seq(0,56,by=0.1),
+      background=oswb$background[1],
+      meanuptakediet=oswb$meanuptakediet[1],
+      #elimrate=oswb$elimrate[1]
+      uptakeboot=oswbnlsboot$estiboot[2,1]
+      ), interval="confidence"))
+oswbnlspredboot2$timemod <- c(seq(from=0,to=56,by=0.1))
+
+```
+
+
+### Summary of whole rabbit PFOS concentations on day 28 via bootstraps  
+
+```{r}
+
+data.frame(
+  day=oswbnlspredboot[oswbnlspredboot$timemod==28,4],
+  medianestimate=oswbnlspredboot[oswbnlspredboot$timemod==28,1],
+  lowerestimate=oswbnlspredboot[oswbnlspredboot$timemod==28,2],
+  upperestimate=oswbnlspredboot[oswbnlspredboot$timemod==28,3]
+  )|> kable(caption="Day 28 PFOS bootstrap whole animal estimate using nonlinear uptake rate and Vd and OECD elimination rate")
+
+
+data.frame(
+  day=oswbnlspredboot2[oswbnlspredboot2$timemod==28,4],
+  medianestimate=oswbnlspredboot2[oswbnlspredboot2$timemod==28,1],
+  lowerestimate=oswbnlspredboot2[oswbnlspredboot2$timemod==28,2],
+  upperestimate=oswbnlspredboot2[oswbnlspredboot2$timemod==28,3]
+  )|> kable(caption="Day 28 PFOS bootstrap whole animal estimate using bootstrap estimate of nonlinear elimination rate and Vd using bootstrap uptake rate")
+
+```
+
+### Summary of uptake rates via bootstrap estimates  
+
+```{r}
+
+#summary(bafvectoswb$up) # up 
+#sd(bafvectoswb$up)
+#quantile(bafvectoswb$up, probs=c(0.025,0.975))
+hist(bafvectoswb$up, breaks=100)
+hist(log(bafvectoswb$up), breaks=100)
+
+data.frame(
+  mean=mean(bafvectoswb$up),
+  median=median(bafvectoswb$up),
+  sd=sd(bafvectoswb$up),
+  twentyfifth=quantile(bafvectoswb$up, probs=c(0.25), names=F),
+  seventyfifth=quantile(bafvectoswb$up, probs=c(0.75), names=F),
+  lower=quantile(bafvectoswb$up, probs=c(0.025), names=F),
+  upper=quantile(bafvectoswb$up, probs=0.975, names=F),
+  min=min(bafvectoswb$up),
+  max=max(bafvectoswb$up)
+) |>
+  kable(caption="summary stats of uptake rate bootstrap distribution")
+
+```
+
+### Summary of elimination rates via bootstrap estimates  
+
+```{r}
+
+#summary(bafvectoswb$down) # elim
+#sd(bafvectoswb$down)
+#quantile(bafvectoswb$down, probs=c(0.025,0.975))
+hist(bafvectoswb$down, breaks=100)
+hist(log(bafvectoswb$down), breaks=100)
+
+data.frame(
+  mean=mean(bafvectoswb$down),
+  median=median(bafvectoswb$down),
+  sd=sd(bafvectoswb$down),
+  twentyfifth=quantile(bafvectoswb$down, probs=c(0.25), names=F),
+  seventyfifth=quantile(bafvectoswb$down, probs=c(0.75), names=F),
+  lower=quantile(bafvectoswb$down, probs=c(0.025), names=F),
+  upper=quantile(bafvectoswb$down, probs=0.975, names=F),
+  min=min(bafvectoswb$down),
+  max=max(bafvectoswb$down)
+) |>
+  kable(caption="summary stats of elimination rate bootstrap distribution")
+```
+
+### half-life using bootstrapped elimination rates  
+
+Median half-life of PFOS is `r log(2)/median(bafvectoswb$down, na.rm=T)` with lower at `r log(2)/quantile(bafvectoswb$down, probs=0.975, na.rm=T, names=F)` and upper at `r ifelse(log(2)/quantile(bafvectoswb$down, probs=0.025, na.rm=T, names=F)!=Inf,log(2)/quantile(bafvectoswb$down, probs=0.025, na.rm=T, names=F),"Inf")`.
+
+```{r}
+
+summary(log(2)/bafvectoswb$down)
+
+hist(log(2)/bafvectoswb$down, breaks=100)
+hist(log10(log(2)/bafvectoswb$down), breaks=100)
+plot(density(log10(log(2)/bafvectoswb$down)))
+
+```
+
+
+### Summary of TTC (uptake/elimination) and ln(TTC) resampling  
+
+
+```{r}
+
+bafvectoswb <- data.frame(up=c(bafvectoswb$up), down=c(bafvectoswb$down))
+bafvectoswb$baf <- bafvectoswb$up/bafvectoswb$down
+
+data.frame(
+  mean=mean(bafvectoswb$baf),
+  median=median(bafvectoswb$baf),
+  sd=sd(bafvectoswb$baf),
+  twentyfifth=quantile(bafvectoswb$baf, probs=c(0.25), names=F),
+  seventyfifth=quantile(bafvectoswb$baf, probs=c(0.75), names=F),
+  lower=quantile(bafvectoswb$baf, probs=c(0.025), names=F),
+  upper=quantile(bafvectoswb$baf, probs=0.975, names=F),
+  min=min(bafvectoswb$baf),
+  max=max(bafvectoswb$baf)
+) |>
+  kable(caption="summary stats of TTC bootstrap distribution")
+
+data.frame(
+  mean=mean(log(bafvectoswb$baf)),
+  median=median(log(bafvectoswb$baf)),
+  sd=sd(log(bafvectoswb$baf)),
+  twentyfifth=quantile(log(bafvectoswb$baf), probs=c(0.25), names=F),
+  seventyfifth=quantile(log(bafvectoswb$baf), probs=c(0.75), names=F),
+  lower=quantile(log(bafvectoswb$baf), probs=c(0.025), names=F),
+  upper=quantile(log(bafvectoswb$baf), probs=0.975, names=F),
+  min=min(log(bafvectoswb$baf)),
+  max=max(log(bafvectoswb$baf))
+) |>
+  kable(caption="summary stats of log(TTC) bootstrap distribution")
+
+hist(bafvectoswb$baf, breaks=100)
+hist(log(bafvectoswb$baf), breaks=100)
+
+
+```
+
+
+## PFOS estimate at 56 days constant exposure  
+
+Requires fitting nonlinear model through just 28 days--is not the suggested route of the original authors. This is due to the desire to concurrently estimate uptake, elimination, and Vd parameters. So, if that's not needed, does not need to be performed.  
+
+Elimination rate here is set to OECD method value, all other background and diet data set as before. Only change is that nonlinear function parameters are estimated using only data through day 28.   
+
+Target estimated concentration at day 56 of constant exposure (assume no elimination period in study).  
+
+
+```{r}
+
+plot(combinedconc3~timemod, data=oswb|>filter(!is.na(combinedconc3))|>filter(timemod<=28), main="clearly no real need for a nonlinear model for PFOS uptake")
+abline(lm(combinedconc3~timemod, data=oswb|>filter(!is.na(combinedconc3))|>filter(timemod<=28)))
+summary(lm(combinedconc3~timemod, data=oswb|>filter(!is.na(combinedconc3))|>filter(timemod<=28)))
+oswblm <- lm(combinedconc3~timemod, data=oswb|>filter(!is.na(combinedconc3))|>filter(timemod<=28))
+predict(oswblm, newdata=data.frame(timemod=56), interval="confidence") |> kable(caption="linear model predicted whole animal PFOS concentration and 95% confidence intervals.")
+
+# uptake rate is most likely 0.15829
+
+oswbnlsbootday56 <- nlsBoot(nls(combinedconc3~background+((meanuptakediet*k01)/(V*(k01-k10)))*(exp(-k10*timemod)-exp(-k01*timemod)),
+                        data=oswb|>filter(!is.na(combinedconc3))|>filter(timemod<=29),
+                        start=list(V=5, k10=0, k01=0.16), upper=c(100,2,2), lower=c(0,-2,-2),algorithm="port"))
+
+
+
+#oswbnlsbootday56b <- nlsBoot(nlsLM(combinedconc3~background+((meanuptakediet*k01)/(V*(k01-0.002)))*(exp(-0.002*timemod)-exp(-k01*timemod)),
+#                        data=oswb|>filter(!is.na(combinedconc3))|>filter(timemod<=28),
+#                        start=list(V=1, k01=0.003397), upper=c(10,2), lower=c(0,-2),algorithm="port"))
+
+#testfit <- nls_multstart(
+#  combinedconc3~background+((meanuptakediet*k01)/(V*(k01-0.002)))*(exp(-0.002*timemod)-exp(-k01*timemod)),
+#  data=oswb|>filter(!is.na(combinedconc3))|>filter(timemod<=28),
+#  iter=c(10,1000),
+#  lower=c(V=0,k01=0),
+#  upper=c(V=10, k01=1),
+#  start_lower=c(V=0.5,k01=0),
+#  start_upper=c(V=1,k01=1),
+#  supp_errors="Y",
+#  convergence_count=F
+#)
+#summary(testfit)
+#
+#
+#testfit2 <- nls_multstart(
+#  combinedconc3~background+((meanuptakediet*k01)/(V*(k01-K10)))*(exp(-K10*timemod)-exp(-k01*timemod)),
+#  data=oswb|>filter(!is.na(combinedconc3))|>filter(timemod<=28),
+#  iter=c(10,100,100),
+#  lower=c(V=0,k01=0,k10=0),
+#  upper=c(V=10, k01=1,k10=1),
+#  start_lower=c(V=0.5,k01=0,k10=0),
+#  start_upper=c(V=1,k01=0.1,k10=1),
+#  supp_errors="Y",
+#  convergence_count=F
+#)
+#summary(testfit2)
+#0.0042658
+```
+
+
+```{r}
+
+plot(combinedconc3~timemod, data=oswb|>filter(timemod<=29))
+
+```
+
+
+
+  
+
+```{r}
+
+
+summary(oswbnlsbootday56)
+
+#summary(oswbnlsbootday56b)
+
+
+```
+
+
+```{r}
+
+oswbnlspredbootday56 <- data.frame(
+  nlsBootPredict(
+    oswbnlsbootday56, newdata=data.frame(
+      timemod=seq(0,56,by=1),
+      background=oswb$background[1],
+      meanuptakediet=oswb$meanuptakediet[1]#,
+      #elimrate=oswb$elimrate[1]
+      #uptakeboot=oswbnlsboot$estiboot[2,1]
+      ), interval="confidence"))
+oswbnlspredbootday56$timemod <- c(seq(from=0,to=56,by=1))
+
+
+
+
+#oswbnlspredbootday56b <- data.frame(
+#  nlsBootPredict(
+#    oswbnlsbootday56b, newdata=data.frame(
+#      timemod=seq(0,56,by=1),
+#      background=oswb$background[1],
+#      meanuptakediet=oswb$meanuptakediet[1]#,
+#      #elimrate=oswb$elimrate[1]
+#      #uptakeboot=oswbnlsboot$estiboot[2,1]
+#      ), interval="confidence"))
+#oswbnlspredbootday56b$timemod <- c(seq(from=0,to=56,by=1))
+
+```
+
+
+```{r}
+
+plot(oswbnlspredbootday56$Median~oswbnlspredbootday56$timemod, type="l")
+points(combinedconc3~timemod, data=oswb|>filter(!is.na(combinedconc3))|>filter(timemod<=29))
+points(oswbnlspredbootday56$X2.5.~oswbnlspredbootday56$timemod, type="l")
+points(oswbnlspredbootday56$X97.5.~oswbnlspredbootday56$timemod, type="l")
+
+
+```
+
+```{r}
+
+#plot(oswbnlspredbootday56b$Median~oswbnlspredbootday56b$timemod, type="l")
+#points(combinedconc3~timemod, data=oswb|>filter(!is.na(combinedconc3))|>filter(timemod<=29))
+#points(oswbnlspredbootday56b$X2.5.~oswbnlspredbootday56b$timemod, type="l")
+#points(oswbnlspredbootday56b$X97.5.~oswbnlspredbootday56b$timemod, type="l")
+
+
+```
+
+
+```{r}
+
+data.frame(
+  day=oswbnlspredbootday56[oswbnlspredbootday56$timemod==56,4],
+  medianestimate=oswbnlspredbootday56[oswbnlspredbootday56$timemod==56,1],
+  lowerestimate=oswbnlspredbootday56[oswbnlspredbootday56$timemod==56,2],
+  upperestimate=oswbnlspredbootday56[oswbnlspredbootday56$timemod==56,3]
+  )|> kable(caption="Day 56 PFOS bootstrap whole animal estimate using nonlinear model fit to data only during uptake period")
+
+
+```
+
+```{r}
+
+#data.frame(
+#  day=oswbnlspredbootday56b[oswbnlspredbootday56b$timemod==56,4],
+#  medianestimate=oswbnlspredbootday56b[oswbnlspredbootday56b$timemod==56,1],
+#  lowerestimate=oswbnlspredbootday56b[oswbnlspredbootday56b$timemod==56,2],
+#  upperestimate=oswbnlspredbootday56b[oswbnlspredbootday56b$timemod==56,3]
+#  )|> kable(caption="Day 56 PFOS bootstrap whole animal estimate using nonlinear model fit to data only during uptake period")
+
+
+```
+
+
+
+
+
+
+
+## 8:2 FTS  
+
+mean diet is 20.315
+mean starting background is 0.0835470  
+elimination rate is 0.0009490 (negative is in function not value) with se of 0.0131191  
+starting uptake is 0.1159380	
+
+ 
+
+```{r}
+
+
+
+ftswb <- rabbitwide |> filter(PFAS=="8:2 FTS")
+ftswb$meanuptakediet <- mean(ftswb$meandietconc[ftswb$timemod<=28])
+ftswb$background <- mean(rabbitwide$combinedconc3[rabbitwide$PFAS=="8:2 FTS"&rabbitwide$timemod==0])
+ftswb$elimrate <- -elimrates$estimate[elimrates$PFAS=="8:2 FTS"] #note that this requires changing the sign to "positive"
+ftswb$uprate <- uptakerates$estimate[uptakerates$PFAS=="8:2 FTS"]
+
+
+ftswbnls <- nls(combinedconc3~background+((meanuptakediet*k01)/(V*(k01-elimrate)))*(exp(-elimrate*timemod)-exp(-k01*timemod)),
+               #combinedconc3~0.2927293+((7.1*k01)/(V*(k01-0.029)))*(exp(-0.029*timemod)-exp(-k01*timemod)),
+               data=ftswb,
+               start=list(V=1, k01=0.1) ,upper=c(10,1), lower=c(0,0),algorithm="port"#,trace=T
+             )
+
+```
+
+### Parametric estimate of uptake rate and Vd using OECD elimination rate  
+
+```{r}
+summary(ftswbnls)
+#overview(ftswbnls)
+
+```
+
+
+```{r}
+ftswbnlsboot <- nlsBoot(nls(combinedconc3~background+((meanuptakediet*k01)/(V*(k01-elimrate)))*(exp(-elimrate*timemod)-exp(-k01*timemod)),
+               data=ftswb|>filter(!is.na(combinedconc3)),
+               start=list(V=1, k01=0.1) ,upper=c(10,1), lower=c(0,0),algorithm="port"#,trace=T
+             ))
+```
+
+### Bootstrap estimate of uptake rate and Vd using OECD elimination rate  
+
+```{r}
+summary(ftswbnlsboot)
+
+
+```
+
+
+```{r}
+
+ftswb$uptakeboot <- ftswbnlsboot$estiboot[2,1]
+ftswbnlsboot2 <- nlsBoot(nls(combinedconc3~background+((meanuptakediet*uptakeboot)/(V*(uptakeboot-k10)))*(exp(-k10*timemod)-exp(-uptakeboot*timemod)),
+               data=ftswb|>filter(!is.na(combinedconc3)),
+               start=list(V=1, k10=0.0043) ,upper=c(10,1), lower=c(0,0),algorithm="port"#,trace=T
+             ))
+```
+
+### Bootstrap estimate of elimination rate and Vd using bootstrap uptake rate  
+
+```{r}
+summary(ftswbnlsboot2)
+
+ftswb$elimboot <- ftswbnlsboot2$estiboot[2,1]
+```
+
+
+```{r}
+
+bafvectftswb <- data.frame(
+  up=c(sample(ftswbnlsboot$coefboot[,2], size=10000, replace=T)), 
+  down=c(sample(ftswbnlsboot2$coefboot[,2], size=10000, replace=T)),
+  PFAS="8:2 FTS"
+  )
+
+#nlsBootPredict(ftswbnlsboot,
+#               newdata=data.frame(
+#                 timemod=seq(0,56,1),
+#                 background=ftswb$background[1],
+#                 meanuptakediet=ftswb$meanuptakediet[1],
+#                 elimrate=ftswb$elimrate[1]
+#                 #uptakeboot=ftswbnlsboot$estiboot[2,1]
+#               ), interval="confidence")
+
+
+ftswbnlspredboot <- data.frame(
+  nlsBootPredict(
+    ftswbnlsboot, newdata=data.frame(
+      timemod=seq(0,56,by=0.1),
+      background=ftswb$background[1],
+      meanuptakediet=ftswb$meanuptakediet[1],
+      elimrate=ftswb$elimrate[1]
+      #uptakeboot=ftswbnlsboot$estiboot[2,1]
+      ), interval="confidence"))
+ftswbnlspredboot$timemod <- c(seq(from=0,to=56,by=0.1))
+
+ftswbnlspredboot2 <- data.frame(
+  nlsBootPredict(
+    ftswbnlsboot2, newdata=data.frame(
+      timemod=seq(0,56,by=0.1),
+      background=ftswb$background[1],
+      meanuptakediet=ftswb$meanuptakediet[1],
+      #elimrate=ftswb$elimrate[1]
+      uptakeboot=ftswbnlsboot$estiboot[2,1]
+      ), interval="confidence"))
+ftswbnlspredboot2$timemod <- c(seq(from=0,to=56,by=0.1))
+
+```
+
+
+### Summary of whole rabbit 8:2 FTS concentations on day 28 via bootstraps  
+
+```{r}
+
+data.frame(
+  day=ftswbnlspredboot[ftswbnlspredboot$timemod==28,4],
+  medianestimate=ftswbnlspredboot[ftswbnlspredboot$timemod==28,1],
+  lowerestimate=ftswbnlspredboot[ftswbnlspredboot$timemod==28,2],
+  upperestimate=ftswbnlspredboot[ftswbnlspredboot$timemod==28,3]
+  )|> kable(caption="Day 28 8:2 FTS bootstrap whole animal estimate using nonlinear uptake rate and Vd and OECD elimination rate")
+
+
+data.frame(
+  day=ftswbnlspredboot2[ftswbnlspredboot2$timemod==28,4],
+  medianestimate=ftswbnlspredboot2[ftswbnlspredboot2$timemod==28,1],
+  lowerestimate=ftswbnlspredboot2[ftswbnlspredboot2$timemod==28,2],
+  upperestimate=ftswbnlspredboot2[ftswbnlspredboot2$timemod==28,3]
+  )|> kable(caption="Day 28 8:2 FTS bootstrap whole animal estimate using bootstrap estimate of nonlinear elimination rate and Vd using bootstrap uptake rate")
+
+```
+
+### Summary of uptake rates via bootstrap estimates  
+
+```{r}
+
+#summary(bafvectftswb$up) # up 
+#sd(bafvectftswb$up)
+#quantile(bafvectftswb$up, probs=c(0.025,0.975))
+hist(bafvectftswb$up, breaks=100)
+hist(log(bafvectftswb$up), breaks=100)
+
+data.frame(
+  mean=mean(bafvectftswb$up),
+  median=median(bafvectftswb$up),
+  sd=sd(bafvectftswb$up),
+  twentyfifth=quantile(bafvectftswb$up, probs=c(0.25), names=F),
+  seventyfifth=quantile(bafvectftswb$up, probs=c(0.75), names=F),
+  lower=quantile(bafvectftswb$up, probs=c(0.025), names=F),
+  upper=quantile(bafvectftswb$up, probs=0.975, names=F),
+  min=min(bafvectftswb$up),
+  max=max(bafvectftswb$up)
+) |>
+  kable(caption="summary stats of uptake rate bootstrap distribution")
+
+```
+
+### Summary of elimination rates via bootstrap estimates  
+
+```{r}
+
+#summary(bafvectftswb$down) # elim
+#sd(bafvectftswb$down)
+#quantile(bafvectftswb$down, probs=c(0.025,0.975))
+hist(bafvectftswb$down, breaks=100)
+hist(log(bafvectftswb$down), breaks=100)
+
+data.frame(
+  mean=mean(bafvectftswb$down),
+  median=median(bafvectftswb$down),
+  sd=sd(bafvectftswb$down),
+  twentyfifth=quantile(bafvectftswb$down, probs=c(0.25), names=F),
+  seventyfifth=quantile(bafvectftswb$down, probs=c(0.75), names=F),
+  lower=quantile(bafvectftswb$down, probs=c(0.025), names=F),
+  upper=quantile(bafvectftswb$down, probs=0.975, names=F),
+  min=min(bafvectftswb$down),
+  max=max(bafvectftswb$down)
+) |>
+  kable(caption="summary stats of elimination rate bootstrap distribution")
+```
+
+### half-life using bootstrapped elimination rates  
+
+Median half-life of 8:2 FTS is `r log(2)/median(bafvectftswb$down, na.rm=T)` with lower at `r log(2)/quantile(bafvectftswb$down, probs=0.975, na.rm=T, names=F)` and upper at `r ifelse(log(2)/quantile(bafvectftswb$down, probs=0.025, na.rm=T, names=F)!=Inf,log(2)/quantile(bafvectftswb$down, probs=0.025, na.rm=T, names=F),"Inf")`.
+
+```{r}
+
+summary(log(2)/bafvectftswb$down)
+
+hist(log(2)/bafvectftswb$down, breaks=100)
+hist(log10(log(2)/bafvectftswb$down), breaks=100)
+plot(density(log10(log(2)/bafvectftswb$down)))
+
+```
+
+
+### Summary of TTC (uptake/elimination) and ln(TTC) resampling  
+
+
+```{r}
+
+bafvectftswb <- data.frame(up=c(bafvectftswb$up), down=c(bafvectftswb$down))
+bafvectftswb$baf <- bafvectftswb$up/bafvectftswb$down
+
+data.frame(
+  mean=mean(bafvectftswb$baf),
+  median=median(bafvectftswb$baf),
+  sd=sd(bafvectftswb$baf),
+  twentyfifth=quantile(bafvectftswb$baf, probs=c(0.25), names=F),
+  seventyfifth=quantile(bafvectftswb$baf, probs=c(0.75), names=F),
+  lower=quantile(bafvectftswb$baf, probs=c(0.025), names=F),
+  upper=quantile(bafvectftswb$baf, probs=0.975, names=F),
+  min=min(bafvectftswb$baf),
+  max=max(bafvectftswb$baf)
+) |>
+  kable(caption="summary stats of TTC bootstrap distribution")
+
+data.frame(
+  mean=mean(log(bafvectftswb$baf)),
+  median=median(log(bafvectftswb$baf)),
+  sd=sd(log(bafvectftswb$baf)),
+  twentyfifth=quantile(log(bafvectftswb$baf), probs=c(0.25), names=F),
+  seventyfifth=quantile(log(bafvectftswb$baf), probs=c(0.75), names=F),
+  lower=quantile(log(bafvectftswb$baf), probs=c(0.025), names=F),
+  upper=quantile(log(bafvectftswb$baf), probs=0.975, names=F),
+  min=min(log(bafvectftswb$baf)),
+  max=max(log(bafvectftswb$baf))
+) |>
+  kable(caption="summary stats of log(TTC) bootstrap distribution")
+
+hist(bafvectftswb$baf, breaks=100)
+hist(log(bafvectftswb$baf), breaks=100)
+
+
+```
+
+
+## 8:2 FTS estimate at 56 days constant exposure 
+
+
+```{r}
+
+plot(combinedconc3~timemod, data=ftswb|>filter(!is.na(combinedconc3))|>filter(timemod<=28), main="clearly no real need for a nonlinear model for 8:2 FTS uptake")
+abline(lm(combinedconc3~timemod, data=ftswb|>filter(!is.na(combinedconc3))|>filter(timemod<=28)))
+summary(lm(combinedconc3~timemod, data=ftswb|>filter(!is.na(combinedconc3))|>filter(timemod<=28)))
+ftswblm <- lm(combinedconc3~timemod, data=ftswb|>filter(!is.na(combinedconc3))|>filter(timemod<=28))
+predict(ftswblm, newdata=data.frame(timemod=56), interval="confidence") |> kable(caption="linear model predicted whole animal 8:2 FTS concentration and 95% confidence intervals.")
+
+# uptake rate is most likely 0.061
+
+
+
+
+ftswbnlsbootday56 <- nlsBoot(nls(combinedconc3~background+((meanuptakediet*k01)/(V*(k01-k10)))*(exp(-k10*timemod)-exp(-k01*timemod)),
+                        data=ftswb|>filter(!is.na(combinedconc3))|>filter(timemod<=28),
+                        start=list(V=5, k10=0, k01=0.061), upper=c(10,1,1), lower=c(0,-2,-2),algorithm="port"))
+
+
+ftswbnlsbootday56b <- nlsBoot(nls(combinedconc3~background+((meanuptakediet*k01)/(V*(k01-0.0009490)))*(exp(-0.0009490*timemod)-exp(-k01*timemod)),
+                        data=ftswb|>filter(!is.na(combinedconc3))|>filter(timemod<=28),
+                        start=list(V=5, k01=0.061), upper=c(10,1), lower=c(0,-2),algorithm="port"))
+
+
+```
+
+
+```{r}
+
+summary(ftswbnlsbootday56)
+
+summary(ftswbnlsbootday56b)
+
+```
+
+
+```{r}
+
+ftswbnlspredbootday56 <- data.frame(
+  nlsBootPredict(
+    ftswbnlsbootday56, newdata=data.frame(
+      timemod=seq(0,56,by=1),
+      background=ftswb$background[1],
+      meanuptakediet=ftswb$meanuptakediet[1]#,
+      #elimrate=ftswb$elimrate[1]
+      #uptakeboot=ftswbnlsboot$estiboot[2,1]
+      ), interval="confidence"))
+ftswbnlspredbootday56$timemod <- c(seq(from=0,to=56,by=1))
+
+
+
+
+ftswbnlspredbootday56b <- data.frame(
+  nlsBootPredict(
+    ftswbnlsbootday56b, newdata=data.frame(
+      timemod=seq(0,56,by=1),
+      background=ftswb$background[1],
+      meanuptakediet=ftswb$meanuptakediet[1]#,
+      #elimrate=ftswb$elimrate[1]
+      #uptakeboot=ftswbnlsboot$estiboot[2,1]
+      ), interval="confidence"))
+ftswbnlspredbootday56b$timemod <- c(seq(from=0,to=56,by=1))
+
+```
+
+
+```{r}
+
+plot(ftswbnlspredbootday56$Median~ftswbnlspredbootday56$timemod, type="l")
+points(combinedconc3~timemod, data=ftswb|>filter(!is.na(combinedconc3))|>filter(timemod<=29))
+points(ftswbnlspredbootday56$X2.5.~ftswbnlspredbootday56$timemod, type="l")
+points(ftswbnlspredbootday56$X97.5.~ftswbnlspredbootday56$timemod, type="l")
+
+
+```
+
+```{r}
+
+plot(ftswbnlspredbootday56b$Median~ftswbnlspredbootday56b$timemod, type="l")
+points(combinedconc3~timemod, data=ftswb|>filter(!is.na(combinedconc3))|>filter(timemod<=29))
+points(ftswbnlspredbootday56b$X2.5.~ftswbnlspredbootday56b$timemod, type="l")
+points(ftswbnlspredbootday56b$X97.5.~ftswbnlspredbootday56b$timemod, type="l")
+
+
+```
+
+
+```{r}
+
+data.frame(
+  day=ftswbnlspredbootday56[ftswbnlspredbootday56$timemod==56,4],
+  medianestimate=ftswbnlspredbootday56[ftswbnlspredbootday56$timemod==56,1],
+  lowerestimate=ftswbnlspredbootday56[ftswbnlspredbootday56$timemod==56,2],
+  upperestimate=ftswbnlspredbootday56[ftswbnlspredbootday56$timemod==56,3]
+  )|> kable(caption="Day 56 8:2 FTS bootstrap whole animal estimate using nonlinear model fit to data only during uptake period")
+
+
+```
+
+```{r}
+
+data.frame(
+  day=ftswbnlspredbootday56b[ftswbnlspredbootday56b$timemod==56,4],
+  medianestimate=ftswbnlspredbootday56b[ftswbnlspredbootday56b$timemod==56,1],
+  lowerestimate=ftswbnlspredbootday56b[ftswbnlspredbootday56b$timemod==56,2],
+  upperestimate=ftswbnlspredbootday56b[ftswbnlspredbootday56b$timemod==56,3]
+  )|> kable(caption="Day 56 8:2 FTS bootstrap whole animal estimate using nonlinear model fit to data only during uptake period")
+
+
+```
